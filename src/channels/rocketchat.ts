@@ -62,6 +62,17 @@ export class RocketChatChannel implements Channel {
       });
 
       let resolved = false;
+      const loginId = this.nextId();
+
+      // Timeout: don't block main() forever if login fails
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          logger.warn('Rocket.Chat connection timed out (15s)');
+          this.ws?.close();
+          reject(new Error('Rocket.Chat connection timed out'));
+        }
+      }, 15000);
 
       this.ws.on('message', (raw: WebSocket.RawData) => {
         const data = JSON.parse(raw.toString());
@@ -71,12 +82,30 @@ export class RocketChatChannel implements Channel {
           this.send({
             msg: 'method',
             method: 'login',
-            id: this.nextId(),
+            id: loginId,
             params: [{ resume: this.authToken }],
           });
         }
 
-        if (data.msg === 'result' && data.result?.id === this.userId) {
+        // Handle login result (success or failure)
+        if (data.msg === 'result' && data.id === loginId) {
+          clearTimeout(timeout);
+          if (data.error) {
+            logger.error(
+              { error: data.error },
+              'Rocket.Chat login failed',
+            );
+            if (!resolved) {
+              resolved = true;
+              this.ws?.close();
+              reject(
+                new Error(
+                  `Rocket.Chat login failed: ${data.error.message || data.error.reason}`,
+                ),
+              );
+            }
+            return;
+          }
           this.connected = true;
           logger.info('Rocket.Chat bot connected');
           console.log(`\n  Rocket.Chat bot: ${this.url}`);
@@ -101,6 +130,7 @@ export class RocketChatChannel implements Channel {
       });
 
       this.ws.on('close', () => {
+        clearTimeout(timeout);
         this.connected = false;
         this.subscribedRooms.clear();
         if (!resolved) {
@@ -149,7 +179,9 @@ export class RocketChatChannel implements Channel {
     if (!fields?.args?.[0]) return;
 
     const msg = fields.args[0] as Record<string, unknown>;
-    const user = msg.u as { _id: string; username: string; name?: string } | undefined;
+    const user = msg.u as
+      | { _id: string; username: string; name?: string }
+      | undefined;
 
     // Ignore own messages
     if (!user || user._id === this.userId) return;
@@ -168,7 +200,9 @@ export class RocketChatChannel implements Channel {
     let content = (msg.msg as string) || '';
 
     // Determine chat name from room info
-    const roomName = (msg as Record<string, unknown>).roomName as string | undefined;
+    const roomName = (msg as Record<string, unknown>).roomName as
+      | string
+      | undefined;
     const chatName = roomName ? `#${roomName}` : chatJid;
 
     // Translate @bot mentions into trigger format
@@ -182,7 +216,12 @@ export class RocketChatChannel implements Channel {
 
     // Handle file attachments
     const attachments = msg.attachments as
-      | Array<{ title?: string; type?: string; image_url?: string; title_link?: string }>
+      | Array<{
+          title?: string;
+          type?: string;
+          image_url?: string;
+          title_link?: string;
+        }>
       | undefined;
     if (attachments?.length) {
       const desc = attachments
@@ -196,14 +235,23 @@ export class RocketChatChannel implements Channel {
     }
 
     // Emit metadata
-    const isGroup = !!(msg as Record<string, unknown>).channels ||
-      roomId !== sender;
-    this.opts.onChatMetadata(chatJid, timestamp, chatName, 'rocketchat', isGroup);
+    const isGroup =
+      !!(msg as Record<string, unknown>).channels || roomId !== sender;
+    this.opts.onChatMetadata(
+      chatJid,
+      timestamp,
+      chatName,
+      'rocketchat',
+      isGroup,
+    );
 
     // Only deliver for registered groups
     const group = this.opts.registeredGroups()[chatJid];
     if (!group) {
-      logger.debug({ chatJid, chatName }, 'Message from unregistered Rocket.Chat room');
+      logger.debug(
+        { chatJid, chatName },
+        'Message from unregistered Rocket.Chat room',
+      );
       return;
     }
 
@@ -246,7 +294,10 @@ export class RocketChatChannel implements Channel {
 
       if (!res.ok) {
         const body = await res.text();
-        logger.error({ jid, status: res.status, body }, 'Rocket.Chat send failed');
+        logger.error(
+          { jid, status: res.status, body },
+          'Rocket.Chat send failed',
+        );
         return;
       }
 
@@ -282,15 +333,9 @@ export class RocketChatChannel implements Channel {
     const roomId = jid.replace(/^rc:/, '');
     this.send({
       msg: 'method',
-      method: isTyping
-        ? 'stream-notify-room'
-        : 'stream-notify-room',
+      method: isTyping ? 'stream-notify-room' : 'stream-notify-room',
       id: this.nextId(),
-      params: [
-        `${roomId}/typing`,
-        this.getBotUsername(),
-        isTyping,
-      ],
+      params: [`${roomId}/typing`, this.getBotUsername(), isTyping],
     });
   }
 
@@ -312,8 +357,7 @@ registerChannel('rocketchat', (opts: ChannelOpts) => {
     'ROCKETCHAT_USER_ID',
     'ROCKETCHAT_AUTH_TOKEN',
   ]);
-  const url =
-    process.env.ROCKETCHAT_URL || envVars.ROCKETCHAT_URL || '';
+  const url = process.env.ROCKETCHAT_URL || envVars.ROCKETCHAT_URL || '';
   const userId =
     process.env.ROCKETCHAT_USER_ID || envVars.ROCKETCHAT_USER_ID || '';
   const authToken =
