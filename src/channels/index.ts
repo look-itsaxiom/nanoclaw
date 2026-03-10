@@ -6,6 +6,9 @@ import './discord.js';
 
 // gmail
 
+// rocketchat
+import './rocketchat.js';
+
 // slack
 
 // telegram
